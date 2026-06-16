@@ -27,6 +27,7 @@ internal static class NowPlayingTileService
     public static void SetPlugin(MacroDeckPlugin macroDeckPlugin)
     {
         plugin = macroDeckPlugin;
+        DiscoverButtons();
         Timer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
 
@@ -58,10 +59,25 @@ internal static class NowPlayingTileService
         }
     }
 
+    private static void DiscoverButtons()
+    {
+        lock (Gate)
+        {
+            foreach (var button in ProfileManager.Profiles
+                         .SelectMany(profile => profile.Folders)
+                         .SelectMany(folder => folder.ActionButtons)
+                         .Where(button => button.Actions.Any(action => action is UseNowPlayingArtButtonAction)))
+            {
+                Buttons[button.Guid] = button;
+            }
+        }
+    }
+
     private static void Tick()
     {
         lock (Gate)
         {
+            DiscoverButtons();
             if (isPolling)
             {
                 return;
