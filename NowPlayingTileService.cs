@@ -148,6 +148,7 @@ internal static class NowPlayingTileService
             var fingerprint = track.GetFingerprint();
             if (fingerprint == lastFingerprint)
             {
+                ApplyCachedImageToDiscoveredButtons();
                 return;
             }
 
@@ -172,6 +173,29 @@ internal static class NowPlayingTileService
             {
                 MacroDeckLogger.Error(plugin, $"Now Playing Art Button update failed.\r\n{ex}");
             }
+        }
+    }
+
+    private static void ApplyCachedImageToDiscoveredButtons()
+    {
+        if (string.IsNullOrEmpty(lastBase64))
+        {
+            return;
+        }
+
+        List<ActionButton> buttons;
+        lock (Gate)
+        {
+            buttons = Buttons.Values
+                .Where(button => button.LabelOff?.LabelBase64 != lastBase64 ||
+                                 button.LabelOn?.LabelBase64 != lastBase64 ||
+                                 HasNowPlayingVariableLabel(button))
+                .ToList();
+        }
+
+        foreach (var button in buttons)
+        {
+            ApplyImage(button, lastBase64);
         }
     }
 
