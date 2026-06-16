@@ -72,11 +72,33 @@ internal static class NowPlayingTileService
             foreach (var button in ProfileManager.Profiles
                          .SelectMany(profile => profile.Folders)
                          .SelectMany(folder => folder.ActionButtons)
-                         .Where(button => button.Actions.Any(action => action is UseNowPlayingArtButtonAction)))
+                         .Where(button => button.Actions.Any(action => action is UseNowPlayingArtButtonAction) ||
+                                          HasNowPlayingVariableLabel(button)))
             {
                 Buttons[button.Guid] = button;
             }
         }
+    }
+
+    private static bool HasNowPlayingVariableLabel(ActionButton button)
+    {
+        return IsNowPlayingVariableText(button.LabelOff?.LabelText) ||
+               IsNowPlayingVariableText(button.LabelOn?.LabelText);
+    }
+
+    private static bool IsNowPlayingVariableText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return value.Contains("current_playing_title", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("current_playing_artist", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("youtube_title", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("youtube_artist", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("wnp_title", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("wnp_artist", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void Tick()

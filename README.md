@@ -19,6 +19,8 @@ If Windows does not provide usable cover art, the plugin searches public online 
 
 The button updates about once per second when the song changes.
 
+The plugin also auto-detects existing label buttons that use common now-playing variables such as `{current_playing_title}`, `{current_playing_artist}`, `{youtube_title}`, `{youtube_artist}`, `{wnp_title}`, or `{wnp_artist}` and turns those into cover-art tiles.
+
 ## Online artwork lookup
 
 Only the song title and artist are sent to public music search endpoints. The plugin does not upload audio, files, playlists, profiles, accounts, tokens, or Macro Deck data.
