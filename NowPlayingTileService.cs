@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text.Json;
 using SuchByte.MacroDeck.ActionButton;
 using SuchByte.MacroDeck.Folders;
+using SuchByte.MacroDeck.Icons;
 using SuchByte.MacroDeck.Logging;
 using SuchByte.MacroDeck.Plugins;
 using SuchByte.MacroDeck.Profiles;
@@ -17,9 +18,13 @@ namespace NowPlayingArtButton;
 internal static class NowPlayingTileService
 {
     private const int TileSize = 512;
+    private const string DynamicIconPackName = "Now Playing Art Button";
+    private const string DynamicIconPackAuthor = "lenno";
+    private const string DynamicIconPackPackageId = "lenno.NowPlayingArtButton.DynamicIcons";
+    private const string DynamicIconId = "current";
     private static readonly object Gate = new();
     private static readonly Dictionary<string, ActionButton> Buttons = new();
-    private static readonly Dictionary<string, byte[]?> ArtworkCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, OnlineMetadata?> MetadataCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HttpClient HttpClient = new()
     {
         Timeout = TimeSpan.FromSeconds(6)
@@ -29,10 +34,12 @@ internal static class NowPlayingTileService
     private static bool isPolling;
     private static string lastFingerprint = string.Empty;
     private static string lastBase64 = string.Empty;
+    private static byte[]? lastPngBytes;
 
     public static void SetPlugin(MacroDeckPlugin macroDeckPlugin)
     {
         plugin = macroDeckPlugin;
+        EnsureDynamicIconPack();
         DiscoverButtons();
         Timer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
@@ -149,12 +156,15 @@ internal static class NowPlayingTileService
             if (fingerprint == lastFingerprint)
             {
                 ApplyCachedImageToDiscoveredButtons();
+                _ = PrefetchLikelyNextTrackAsync(track);
                 return;
             }
 
-            var imageBase64 = RenderTile(track);
+            var renderedTile = RenderTile(track);
             lastFingerprint = fingerprint;
-            lastBase64 = imageBase64;
+            lastBase64 = renderedTile.Base64;
+            lastPngBytes = renderedTile.PngBytes;
+            SaveDynamicIcon(renderedTile.PngBytes);
 
             List<ActionButton> buttons;
             lock (Gate)
@@ -164,8 +174,10 @@ internal static class NowPlayingTileService
 
             foreach (var button in buttons)
             {
-                ApplyImage(button, imageBase64);
+                ApplyImage(button, renderedTile.Base64);
             }
+
+            _ = PrefetchLikelyNextTrackAsync(track);
         }
         catch (Exception ex)
         {
@@ -181,6 +193,11 @@ internal static class NowPlayingTileService
         if (string.IsNullOrEmpty(lastBase64))
         {
             return;
+        }
+
+        if (lastPngBytes is { Length: > 0 })
+        {
+            SaveDynamicIcon(lastPngBytes);
         }
 
         List<ActionButton> buttons;
@@ -251,35 +268,50 @@ internal static class NowPlayingTileService
             return track;
         }
 
-        byte[]? bytes;
+        OnlineMetadata? metadata;
         lock (Gate)
         {
-            if (ArtworkCache.TryGetValue(lookup, out bytes))
+            if (MetadataCache.TryGetValue(lookup, out metadata))
             {
-                return track with { ThumbnailBytes = bytes };
+                return ApplyOnlineMetadata(track, metadata);
             }
         }
 
-        bytes = await LookupArtworkAsync(lookup);
+        metadata = await LookupOnlineMetadataAsync(lookup);
         if (plugin is not null)
         {
-            MacroDeckLogger.Info(plugin, bytes is { Length: > 0 }
-                ? $"Now Playing Art Button: online artwork found for \"{lookup}\"."
-                : $"Now Playing Art Button: online artwork not found for \"{lookup}\".");
+            MacroDeckLogger.Info(plugin, metadata is { ArtworkBytes.Length: > 0 }
+                ? $"Now Playing Art Button: online metadata found for \"{lookup}\" -> \"{metadata.Title}\" / \"{metadata.Artist}\"."
+                : $"Now Playing Art Button: online metadata not found for \"{lookup}\".");
         }
 
         lock (Gate)
         {
-            ArtworkCache[lookup] = bytes;
-            if (ArtworkCache.Count > 80)
+            MetadataCache[lookup] = metadata;
+            if (MetadataCache.Count > 100)
             {
-                ArtworkCache.Remove(ArtworkCache.Keys.First());
+                MetadataCache.Remove(MetadataCache.Keys.First());
             }
         }
 
-        return bytes is { Length: > 0 }
-            ? track with { ThumbnailBytes = bytes }
-            : track;
+        return ApplyOnlineMetadata(track, metadata);
+    }
+
+    private static TrackInfo ApplyOnlineMetadata(TrackInfo track, OnlineMetadata? metadata)
+    {
+        if (metadata is null)
+        {
+            return track;
+        }
+
+        return track with
+        {
+            Title = Normalize(CleanTrackText(metadata.Title), track.Title),
+            Artist = Normalize(CleanTrackText(metadata.Artist), track.Artist),
+            ThumbnailBytes = metadata.ArtworkBytes is { Length: > 0 }
+                ? metadata.ArtworkBytes
+                : track.ThumbnailBytes
+        };
     }
 
     private static string BuildLookup(TrackInfo track)
@@ -324,13 +356,13 @@ internal static class NowPlayingTileService
         return cleaned.Trim();
     }
 
-    private static async Task<byte[]?> LookupArtworkAsync(string lookup)
+    private static async Task<OnlineMetadata?> LookupOnlineMetadataAsync(string lookup)
     {
-        return await LookupITunesArtworkAsync(lookup)
-            ?? await LookupDeezerArtworkAsync(lookup);
+        return await LookupITunesMetadataAsync(lookup)
+            ?? await LookupDeezerMetadataAsync(lookup);
     }
 
-    private static async Task<byte[]?> LookupITunesArtworkAsync(string lookup)
+    private static async Task<OnlineMetadata?> LookupITunesMetadataAsync(string lookup)
     {
         try
         {
@@ -353,7 +385,13 @@ internal static class NowPlayingTileService
                 ? artwork.GetString()
                 : null;
             artworkUrl = UpgradeArtworkUrl(artworkUrl);
-            return await DownloadArtworkAsync(artworkUrl);
+            var title = results[0].TryGetProperty("trackName", out var trackName)
+                ? trackName.GetString() ?? string.Empty
+                : string.Empty;
+            var artist = results[0].TryGetProperty("artistName", out var artistName)
+                ? artistName.GetString() ?? string.Empty
+                : string.Empty;
+            return new OnlineMetadata(title, artist, await DownloadArtworkAsync(artworkUrl));
         }
         catch
         {
@@ -361,7 +399,7 @@ internal static class NowPlayingTileService
         }
     }
 
-    private static async Task<byte[]?> LookupDeezerArtworkAsync(string lookup)
+    private static async Task<OnlineMetadata?> LookupDeezerMetadataAsync(string lookup)
     {
         try
         {
@@ -389,12 +427,43 @@ internal static class NowPlayingTileService
                 : album.TryGetProperty("cover_big", out var coverBig)
                     ? coverBig.GetString()
                     : null;
-            return await DownloadArtworkAsync(artworkUrl);
+            var title = data[0].TryGetProperty("title_short", out var titleShort)
+                ? titleShort.GetString() ?? string.Empty
+                : data[0].TryGetProperty("title", out var titleFull)
+                    ? titleFull.GetString() ?? string.Empty
+                    : string.Empty;
+            var artist = data[0].TryGetProperty("artist", out var artistNode) &&
+                         artistNode.TryGetProperty("name", out var artistName)
+                ? artistName.GetString() ?? string.Empty
+                : string.Empty;
+            return new OnlineMetadata(title, artist, await DownloadArtworkAsync(artworkUrl));
         }
         catch
         {
             return null;
         }
+    }
+
+    private static async Task PrefetchLikelyNextTrackAsync(TrackInfo currentTrack)
+    {
+        // Windows media sessions do not expose YouTube/YouTube Music queue items.
+        // This keeps the online cache warm for the current canonical song; a browser
+        // extension can later provide the actual queue when available.
+        var lookup = BuildLookup(currentTrack);
+        if (string.IsNullOrWhiteSpace(lookup))
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (MetadataCache.ContainsKey(lookup))
+            {
+                return;
+            }
+        }
+
+        _ = await LookupOnlineMetadataAsync(lookup);
     }
 
     private static string? UpgradeArtworkUrl(string? artworkUrl)
@@ -453,7 +522,7 @@ internal static class NowPlayingTileService
         return bytes;
     }
 
-    private static string RenderTile(TrackInfo track)
+    private static RenderedTile RenderTile(TrackInfo track)
     {
         using var bitmap = new Bitmap(TileSize, TileSize, PixelFormat.Format32bppArgb);
         using var graphics = Graphics.FromImage(bitmap);
@@ -466,7 +535,9 @@ internal static class NowPlayingTileService
         DrawScrim(graphics);
         DrawText(graphics, track);
 
-        return Base64.GetBase64FromImage(bitmap);
+        using var stream = new MemoryStream();
+        bitmap.Save(stream, ImageFormat.Png);
+        return new RenderedTile(Base64.GetBase64FromImage(bitmap), stream.ToArray());
     }
 
     private static Image CreateCoverImage(byte[]? thumbnailBytes)
@@ -589,8 +660,8 @@ internal static class NowPlayingTileService
             return;
         }
 
-        button.IconOff = string.Empty;
-        button.IconOn = string.Empty;
+        button.IconOff = $"{DynamicIconPackName}.{DynamicIconId}";
+        button.IconOn = $"{DynamicIconPackName}.{DynamicIconId}";
         button.LabelOff ??= new ButtonLabel();
         button.LabelOn ??= new ButtonLabel();
         button.LabelOff.LabelBase64 = imageBase64;
@@ -606,6 +677,67 @@ internal static class NowPlayingTileService
 
         RefreshButton(button);
         ProfileManager.Save();
+    }
+
+    private static void EnsureDynamicIconPack()
+    {
+        try
+        {
+            var folder = GetDynamicIconPackFolder();
+            Directory.CreateDirectory(folder);
+            var manifestPath = Path.Combine(folder, "ExtensionManifest.json");
+            if (!File.Exists(manifestPath))
+            {
+                File.WriteAllText(manifestPath, """
+                {
+                  "type": 1,
+                  "name": "Now Playing Art Button",
+                  "author": "lenno",
+                  "repository": "https://github.com/LennonAmos/NowPlayingArtButton",
+                  "packageId": "lenno.NowPlayingArtButton.DynamicIcons",
+                  "version": "1.0.0",
+                  "target-plugin-api-version": 40,
+                  "dll": ""
+                }
+                """);
+            }
+
+            IconManager.LoadIconPack(folder);
+        }
+        catch (Exception ex)
+        {
+            if (plugin is not null)
+            {
+                MacroDeckLogger.Warning(plugin, $"Now Playing Art Button could not prepare dynamic icon pack.\r\n{ex}");
+            }
+        }
+    }
+
+    private static void SaveDynamicIcon(byte[] pngBytes)
+    {
+        try
+        {
+            var folder = GetDynamicIconPackFolder();
+            Directory.CreateDirectory(folder);
+            File.WriteAllBytes(Path.Combine(folder, $"{DynamicIconId}.png"), pngBytes);
+            IconManager.LoadIconPack(folder);
+        }
+        catch (Exception ex)
+        {
+            if (plugin is not null)
+            {
+                MacroDeckLogger.Warning(plugin, $"Now Playing Art Button could not update dynamic icon.\r\n{ex}");
+            }
+        }
+    }
+
+    private static string GetDynamicIconPackFolder()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Macro Deck",
+            "iconpacks",
+            DynamicIconPackPackageId);
     }
 
     private static void RefreshButton(ActionButton button)
@@ -641,6 +773,10 @@ internal static class NowPlayingTileService
     {
         return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
     }
+
+    private sealed record RenderedTile(string Base64, byte[] PngBytes);
+
+    private sealed record OnlineMetadata(string Title, string Artist, byte[]? ArtworkBytes);
 
     private sealed record TrackInfo(string Title, string Artist, string PlaybackStatus, byte[]? ThumbnailBytes)
     {

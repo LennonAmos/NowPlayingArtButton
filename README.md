@@ -2,11 +2,11 @@
 
 Macro Deck 2 plugin for Windows that turns a button into a live now-playing tile.
 
-The plugin reads Windows media session metadata locally, renders the current cover art as a square button image, and overlays:
+The plugin reads Windows media session metadata locally, cleans it up with public online music metadata where possible, renders the current cover art as a square button image, and overlays:
 
 `Song title - artist`
 
-If Windows does not provide usable cover art, the plugin searches public online music metadata sources for artwork using the current title and artist. No login, API key, browser extension, upload, or admin permission is required.
+If Windows does not provide usable cover art, the plugin searches public online music metadata sources for artwork using the current title and artist. It also writes the generated tile into a local Macro Deck icon pack so phone clients can receive it as a normal button icon. No login, API key, browser extension, upload, or admin permission is required.
 
 ## Use
 
@@ -24,6 +24,10 @@ The plugin also auto-detects existing label buttons that use common now-playing 
 ## Online artwork lookup
 
 Only the song title and artist are sent to public music search endpoints. The plugin does not upload audio, files, playlists, profiles, accounts, tokens, or Macro Deck data.
+
+## Queue detection
+
+Windows media sessions do not expose YouTube or YouTube Music queue items, so true next-song artwork requires a companion browser extension. The plugin keeps the online metadata cache warm for the current song and is ready for queue metadata when an extension provides it.
 
 ## Build
 
