@@ -73,11 +73,20 @@ internal static class NowPlayingTileService
                          .SelectMany(profile => profile.Folders)
                          .SelectMany(folder => folder.ActionButtons)
                          .Where(button => button.Actions.Any(action => action is UseNowPlayingArtButtonAction) ||
-                                          HasNowPlayingVariableLabel(button)))
+                                          HasNowPlayingVariableLabel(button) ||
+                                          LooksLikeExistingNowPlayingTile(button)))
             {
                 Buttons[button.Guid] = button;
             }
         }
+    }
+
+    private static bool LooksLikeExistingNowPlayingTile(ActionButton button)
+    {
+        return string.IsNullOrEmpty(button.IconOff) &&
+               string.IsNullOrWhiteSpace(button.LabelOff?.LabelText) &&
+               string.IsNullOrWhiteSpace(button.LabelOn?.LabelText) &&
+               (button.LabelOff?.LabelBase64?.Length ?? 0) > 100000;
     }
 
     private static bool HasNowPlayingVariableLabel(ActionButton button)
@@ -182,16 +191,32 @@ internal static class NowPlayingTileService
         var status = playback.PlaybackStatus.ToString();
         var thumbnailBytes = await ReadThumbnailAsync(properties.Thumbnail);
 
+        var title = CleanTrackText(properties.Title);
+        var artist = CleanTrackText(properties.Artist);
+        if (artist.Equals("Topic", StringComparison.OrdinalIgnoreCase))
+        {
+            var separator = title.LastIndexOf(" - ", StringComparison.Ordinal);
+            if (separator > 0 && separator < title.Length - 3)
+            {
+                artist = title[(separator + 3)..].Trim();
+                title = title[..separator].Trim();
+            }
+            else
+            {
+                artist = string.Empty;
+            }
+        }
+
         return new TrackInfo(
-            Normalize(properties.Title, "Nothing playing"),
-            Normalize(properties.Artist, "Unknown artist"),
+            Normalize(title, "Nothing playing"),
+            Normalize(artist, "Unknown artist"),
             status,
             thumbnailBytes);
     }
 
     private static async Task<TrackInfo> EnrichOnlineMetadataAsync(TrackInfo track)
     {
-        if (track.IsEmpty || track.HasUsableThumbnail)
+        if (track.IsEmpty)
         {
             return track;
         }
@@ -212,6 +237,13 @@ internal static class NowPlayingTileService
         }
 
         bytes = await LookupArtworkAsync(lookup);
+        if (plugin is not null)
+        {
+            MacroDeckLogger.Info(plugin, bytes is { Length: > 0 }
+                ? $"Now Playing Art Button: online artwork found for \"{lookup}\"."
+                : $"Now Playing Art Button: online artwork not found for \"{lookup}\".");
+        }
+
         lock (Gate)
         {
             ArtworkCache[lookup] = bytes;
@@ -221,7 +253,9 @@ internal static class NowPlayingTileService
             }
         }
 
-        return track with { ThumbnailBytes = bytes };
+        return bytes is { Length: > 0 }
+            ? track with { ThumbnailBytes = bytes }
+            : track;
     }
 
     private static string BuildLookup(TrackInfo track)
@@ -249,7 +283,16 @@ internal static class NowPlayingTileService
         }
 
         var cleaned = value.Trim();
-        foreach (var suffix in new[] { " - YouTube Music", " - YouTube", " (Official Video)", " [Official Video]", " (Official Audio)", " [Official Audio]" })
+        foreach (var suffix in new[]
+                 {
+                     " - YouTube Music",
+                     " - YouTube",
+                     " - Topic",
+                     " (Official Video)",
+                     " [Official Video]",
+                     " (Official Audio)",
+                     " [Official Audio]"
+                 })
         {
             cleaned = cleaned.Replace(suffix, string.Empty, StringComparison.OrdinalIgnoreCase);
         }
@@ -454,7 +497,7 @@ internal static class NowPlayingTileService
         using var bottomScrim = new LinearGradientBrush(
             new Rectangle(0, 210, TileSize, 302),
             Color.FromArgb(0, 0, 0, 0),
-            Color.FromArgb(220, 0, 0, 0),
+            Color.FromArgb(235, 0, 0, 0),
             90f);
         graphics.FillRectangle(bottomScrim, 0, 210, TileSize, 302);
 
@@ -473,9 +516,9 @@ internal static class NowPlayingTileService
         var title = string.IsNullOrWhiteSpace(track.Artist)
             ? track.Title
             : $"{track.Title} - {track.Artist}";
-        var rect = new RectangleF(34, 304, TileSize - 68, 128);
-        using var titleFont = CreateFittedFont(graphics, title, rect, 37f, 19f, FontStyle.Bold);
-        using var statusFont = new Font("Segoe UI Semibold", 15f, FontStyle.Regular);
+        var rect = new RectangleF(28, 268, TileSize - 56, 178);
+        using var titleFont = CreateFittedFont(graphics, title, rect, 54f, 26f, FontStyle.Bold);
+        using var statusFont = new Font("Segoe UI Semibold", 20f, FontStyle.Regular);
         using var white = new SolidBrush(Color.FromArgb(248, 255, 255, 255));
         using var muted = new SolidBrush(Color.FromArgb(206, 255, 255, 255));
         using var shadow = new SolidBrush(Color.FromArgb(170, 0, 0, 0));
@@ -494,8 +537,8 @@ internal static class NowPlayingTileService
         var status = track.PlaybackStatus.Equals("Playing", StringComparison.OrdinalIgnoreCase)
             ? "Now playing"
             : track.PlaybackStatus;
-        graphics.DrawString(status, statusFont, shadow, 36, 454);
-        graphics.DrawString(status, statusFont, muted, 34, 452);
+        graphics.DrawString(status, statusFont, shadow, 36, 458);
+        graphics.DrawString(status, statusFont, muted, 34, 456);
     }
 
     private static Font CreateFittedFont(Graphics graphics, string text, RectangleF rect, float max, float min, FontStyle style)
@@ -532,6 +575,10 @@ internal static class NowPlayingTileService
         button.LabelOn.LabelText = string.Empty;
         button.BackColorOff = Color.FromArgb(16, 18, 24);
         button.BackColorOn = Color.FromArgb(16, 18, 24);
+        if (button.Actions.All(action => action is not UseNowPlayingArtButtonAction))
+        {
+            button.Actions.Add(new UseNowPlayingArtButtonAction());
+        }
 
         RefreshButton(button);
         ProfileManager.Save();
