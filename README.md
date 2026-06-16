@@ -6,16 +6,22 @@ The plugin reads Windows media session metadata locally, renders the current cov
 
 `Song title - artist`
 
-No login, API key, browser extension, upload, or admin permission is required.
+If Windows does not provide usable cover art, the plugin searches public online music metadata sources for artwork using the current title and artist. No login, API key, browser extension, upload, or admin permission is required.
 
 ## Use
 
 1. Install the plugin into Macro Deck.
-2. Add the `Use as now-playing art` action to any button.
-3. Press that button once.
-4. Start media in an app that exposes Windows media metadata, such as Spotify, Edge, Chrome, or YouTube Music.
+2. Open Macro Deck and edit the button you want to use.
+3. Add the `Now Playing Art Button` action named `Use as now-playing art`.
+4. Save the button.
+5. Press that button once on Macro Deck. The plugin will remember that button after restarts.
+6. Start media in an app that exposes Windows media metadata, such as Spotify, Edge, Chrome, or YouTube Music.
 
 The button updates about once per second when the song changes.
+
+## Online artwork lookup
+
+Only the song title and artist are sent to public music search endpoints. The plugin does not upload audio, files, playlists, profiles, accounts, tokens, or Macro Deck data.
 
 ## Build
 

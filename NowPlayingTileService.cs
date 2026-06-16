@@ -1,6 +1,7 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Reflection;
+using System.Text.Json;
 using SuchByte.MacroDeck.ActionButton;
 using SuchByte.MacroDeck.Folders;
 using SuchByte.MacroDeck.Logging;
@@ -18,6 +19,11 @@ internal static class NowPlayingTileService
     private const int TileSize = 512;
     private static readonly object Gate = new();
     private static readonly Dictionary<string, ActionButton> Buttons = new();
+    private static readonly Dictionary<string, byte[]?> ArtworkCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HttpClient HttpClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(6)
+    };
     private static readonly System.Threading.Timer Timer = new(_ => Tick(), null, Timeout.Infinite, Timeout.Infinite);
     private static MacroDeckPlugin? plugin;
     private static bool isPolling;
@@ -107,6 +113,7 @@ internal static class NowPlayingTileService
         try
         {
             var track = await GetCurrentTrackAsync();
+            track = await EnrichOnlineMetadataAsync(track);
             var fingerprint = track.GetFingerprint();
             if (fingerprint == lastFingerprint)
             {
@@ -158,6 +165,183 @@ internal static class NowPlayingTileService
             Normalize(properties.Artist, "Unknown artist"),
             status,
             thumbnailBytes);
+    }
+
+    private static async Task<TrackInfo> EnrichOnlineMetadataAsync(TrackInfo track)
+    {
+        if (track.IsEmpty || track.HasUsableThumbnail)
+        {
+            return track;
+        }
+
+        var lookup = BuildLookup(track);
+        if (string.IsNullOrWhiteSpace(lookup))
+        {
+            return track;
+        }
+
+        byte[]? bytes;
+        lock (Gate)
+        {
+            if (ArtworkCache.TryGetValue(lookup, out bytes))
+            {
+                return track with { ThumbnailBytes = bytes };
+            }
+        }
+
+        bytes = await LookupArtworkAsync(lookup);
+        lock (Gate)
+        {
+            ArtworkCache[lookup] = bytes;
+            if (ArtworkCache.Count > 80)
+            {
+                ArtworkCache.Remove(ArtworkCache.Keys.First());
+            }
+        }
+
+        return track with { ThumbnailBytes = bytes };
+    }
+
+    private static string BuildLookup(TrackInfo track)
+    {
+        var title = CleanTrackText(track.Title);
+        var artist = CleanTrackText(track.Artist);
+        if (title.Equals("Nothing playing", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        if (artist.Equals("Unknown artist", StringComparison.OrdinalIgnoreCase))
+        {
+            artist = string.Empty;
+        }
+
+        return string.IsNullOrWhiteSpace(artist) ? title : $"{title} {artist}";
+    }
+
+    private static string CleanTrackText(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var cleaned = value.Trim();
+        foreach (var suffix in new[] { " - YouTube Music", " - YouTube", " (Official Video)", " [Official Video]", " (Official Audio)", " [Official Audio]" })
+        {
+            cleaned = cleaned.Replace(suffix, string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return cleaned.Trim();
+    }
+
+    private static async Task<byte[]?> LookupArtworkAsync(string lookup)
+    {
+        return await LookupITunesArtworkAsync(lookup)
+            ?? await LookupDeezerArtworkAsync(lookup);
+    }
+
+    private static async Task<byte[]?> LookupITunesArtworkAsync(string lookup)
+    {
+        try
+        {
+            var url = $"https://itunes.apple.com/search?media=music&entity=song&limit=1&term={Uri.EscapeDataString(lookup)}";
+            using var response = await HttpClient.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            using var json = await JsonDocument.ParseAsync(stream);
+            var results = json.RootElement.GetProperty("results");
+            if (results.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            var artworkUrl = results[0].TryGetProperty("artworkUrl100", out var artwork)
+                ? artwork.GetString()
+                : null;
+            artworkUrl = UpgradeArtworkUrl(artworkUrl);
+            return await DownloadArtworkAsync(artworkUrl);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<byte[]?> LookupDeezerArtworkAsync(string lookup)
+    {
+        try
+        {
+            var url = $"https://api.deezer.com/search?q={Uri.EscapeDataString(lookup)}&limit=1";
+            using var response = await HttpClient.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            using var json = await JsonDocument.ParseAsync(stream);
+            if (!json.RootElement.TryGetProperty("data", out var data) || data.GetArrayLength() == 0)
+            {
+                return null;
+            }
+
+            if (!data[0].TryGetProperty("album", out var album))
+            {
+                return null;
+            }
+
+            var artworkUrl = album.TryGetProperty("cover_xl", out var coverXl)
+                ? coverXl.GetString()
+                : album.TryGetProperty("cover_big", out var coverBig)
+                    ? coverBig.GetString()
+                    : null;
+            return await DownloadArtworkAsync(artworkUrl);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? UpgradeArtworkUrl(string? artworkUrl)
+    {
+        if (string.IsNullOrWhiteSpace(artworkUrl))
+        {
+            return null;
+        }
+
+        return artworkUrl
+            .Replace("100x100bb", "600x600bb", StringComparison.OrdinalIgnoreCase)
+            .Replace("100x100-75", "600x600-75", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<byte[]?> DownloadArtworkAsync(string? artworkUrl)
+    {
+        if (string.IsNullOrWhiteSpace(artworkUrl))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var response = await HttpClient.GetAsync(artworkUrl);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            var bytes = await response.Content.ReadAsByteArrayAsync();
+            return bytes.Length > 0 ? bytes : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task<byte[]?> ReadThumbnailAsync(IRandomAccessStreamReference? thumbnail)
@@ -368,6 +552,10 @@ internal static class NowPlayingTileService
     private sealed record TrackInfo(string Title, string Artist, string PlaybackStatus, byte[]? ThumbnailBytes)
     {
         public static TrackInfo Empty { get; } = new("Nothing playing", "", "Stopped", null);
+
+        public bool IsEmpty => Title.Equals("Nothing playing", StringComparison.OrdinalIgnoreCase);
+
+        public bool HasUsableThumbnail => ThumbnailBytes is { Length: > 4096 };
 
         public string GetFingerprint()
         {
