@@ -248,6 +248,8 @@ internal static class NowPlayingTileService
             }
         }
 
+        SplitYouTubeByTitle(ref title, ref artist);
+
         return new TrackInfo(
             Normalize(title, "Nothing playing"),
             Normalize(artist, "Unknown artist"),
@@ -354,6 +356,23 @@ internal static class NowPlayingTileService
         }
 
         return cleaned.Trim();
+    }
+
+    private static void SplitYouTubeByTitle(ref string title, ref string artist)
+    {
+        if (!string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title))
+        {
+            return;
+        }
+
+        var byIndex = title.LastIndexOf(" by ", StringComparison.OrdinalIgnoreCase);
+        if (byIndex <= 0 || byIndex >= title.Length - 4)
+        {
+            return;
+        }
+
+        artist = title[(byIndex + 4)..].Trim();
+        title = title[..byIndex].Trim();
     }
 
     private static async Task<OnlineMetadata?> LookupOnlineMetadataAsync(string lookup)
