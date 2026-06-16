@@ -1,0 +1,11 @@
+{
+  "type": "Plugin",
+  "name": "Now Playing Art Button",
+  "author": "lenno",
+  "packageId": "lenno.NowPlayingArtButton",
+  "version": "1.0.0",
+  "target-plugin-api-version": 40,
+  "target-macro-deck-version": "2.14.1",
+  "repository": "https://github.com/LennonAmos/NowPlayingArtButton",
+  "dll": "NowPlayingArtButton.dll"
+}
