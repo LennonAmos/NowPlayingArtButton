@@ -14,6 +14,7 @@ using SuchByte.MacroDeck.Logging;
 using SuchByte.MacroDeck.Plugins;
 using SuchByte.MacroDeck.Profiles;
 using SuchByte.MacroDeck.Server;
+using SuchByte.MacroDeck.Utils;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
 
@@ -23,11 +24,32 @@ internal readonly record struct LyricsGridSize(int Rows, int Columns);
 
 internal static class LyricsProfileController
 {
-    public const string LyricsProfileName = "Now Playing Lyrics";
-    private const int TileSize = 256;
-    private const string DynamicIconPackName = "Now Playing Lyrics";
+    public const string LyricsProfileName =
+#if DEV_BUILD
+        "Now Playing Lyrics Dev";
+#else
+        "Now Playing Lyrics";
+#endif
+    private const int TileSize =
+#if DEV_BUILD
+        250;
+#else
+        256;
+#endif
+    private const long AnimationLoopMs = 36000;
+    private const string DynamicIconPackName =
+#if DEV_BUILD
+        "Now Playing Lyrics Dev";
+#else
+        "Now Playing Lyrics";
+#endif
     private const string DynamicIconPackAuthor = "lenno";
-    private const string DynamicIconPackPackageId = "lenno.NowPlayingArtButton.LyricsDynamicIcons";
+    private const string DynamicIconPackPackageId =
+#if DEV_BUILD
+        "lenno.NowPlayingArtButton.Dev.LyricsDynamicIcons";
+#else
+        "lenno.NowPlayingArtButton.LyricsDynamicIcons";
+#endif
     private static readonly TimeSpan LyricDisplayLead = TimeSpan.FromMilliseconds(550);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly object Gate = new();
@@ -48,7 +70,25 @@ internal static class LyricsProfileController
     {
         plugin = macroDeckPlugin;
         EnsureDynamicIconPack();
+        _ = WarmupLyricsProfileAsync();
         Timer.Change(TimeSpan.FromSeconds(1), PollInterval);
+    }
+
+    private static async Task WarmupLyricsProfileAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            EnsureLyricsProfileLayout();
+            await RenderFrameAsync(force: true);
+        }
+        catch (Exception ex)
+        {
+            if (plugin is not null)
+            {
+                MacroDeckLogger.Warning(plugin, $"Now Playing Lyrics warmup failed.\r\n{ex}");
+            }
+        }
     }
 
     public static bool GoToLyricsProfile(string clientId)
@@ -165,15 +205,23 @@ internal static class LyricsProfileController
             var now = DateTimeOffset.UtcNow;
             var lyricPosition = media.IsPlaying ? media.Position + LyricDisplayLead : media.Position;
             var activeLine = currentLyrics.GetActiveLine(lyricPosition);
+#if DEV_BUILD
+            var fingerprint = $"{grid.Rows}x{grid.Columns}|{media.GetRenderIdentity()}|{activeLine.Index}|{activeLine.Text}";
+#else
             var fingerprint = $"{grid.Rows}x{grid.Columns}|{media.GetRenderIdentity()}|{activeLine.Index}";
+#endif
             if (!force && fingerprint.Equals(lastRenderedFingerprint, StringComparison.Ordinal))
             {
                 return;
             }
 
             var tiles = RenderTiles(grid, media, currentLyrics, activeLine, now);
+#if DEV_BUILD
+            ApplyTilesToButtons(root, tiles);
+#else
             SaveDynamicTiles(tiles);
-            MacroDeckServer.UpdateFolder(root);
+#endif
+            TryUpdateFolder(root);
             lastRenderedFingerprint = fingerprint;
         }
         catch (Exception ex)
@@ -189,6 +237,9 @@ internal static class LyricsProfileController
     {
         if (HasValidLyricsProfileLayout())
         {
+#if DEV_BUILD
+            EnsureDevBackgroundIconPack(GetTargetGridSize());
+#endif
             return;
         }
 
@@ -213,8 +264,15 @@ internal static class LyricsProfileController
 
         return root.ActionButtons.All(button =>
             button.Actions.Any(action => action is ExitLyricsProfileAction) &&
+#if DEV_BUILD
+            string.IsNullOrWhiteSpace(button.IconOff) &&
+            string.IsNullOrWhiteSpace(button.IconOn) &&
+            !string.IsNullOrWhiteSpace(button.LabelOff?.LabelText) &&
+            !string.IsNullOrWhiteSpace(button.LabelOn?.LabelText));
+#else
             button.IconOff.StartsWith($"{DynamicIconPackName}.tile_", StringComparison.Ordinal) &&
             button.IconOn.StartsWith($"{DynamicIconPackName}.tile_", StringComparison.Ordinal));
+#endif
     }
 
     private static void BuildLyricsProfileLayout()
@@ -266,8 +324,13 @@ internal static class LyricsProfileController
                 {
                     Position_X = column,
                     Position_Y = row,
+#if DEV_BUILD
+                    IconOff = string.Empty,
+                    IconOn = string.Empty,
+#else
                     IconOff = icon,
                     IconOn = icon,
+#endif
                     BackColorOff = Color.FromArgb(10, 12, 18),
                     BackColorOn = Color.FromArgb(10, 12, 18),
                     LabelOff = CreateEmptyLabel(),
@@ -281,9 +344,15 @@ internal static class LyricsProfileController
             }
         }
 
-        SaveDynamicTiles(RenderTiles(grid, MediaSnapshot.Empty, LyricsDocument.Empty("Loading lyrics"), ActiveLyricLine.Empty, DateTimeOffset.UtcNow));
+        var loadingTiles = RenderTiles(grid, MediaSnapshot.Empty, LyricsDocument.Empty("Loading lyrics"), ActiveLyricLine.Empty, DateTimeOffset.UtcNow);
+#if DEV_BUILD
+        EnsureDevBackgroundIconPack(grid);
+        ApplyTilesToButtons(root, loadingTiles);
+#else
+        SaveDynamicTiles(loadingTiles);
+#endif
         ProfileManager.Save();
-        MacroDeckServer.UpdateFolder(root);
+        TryUpdateFolder(root);
     }
 
     private static LyricsGridSize GetTargetGridSize()
@@ -311,12 +380,24 @@ internal static class LyricsProfileController
     {
         return new ButtonLabel
         {
-            LabelText = string.Empty,
+            LabelText = ".",
             LabelPosition = ButtonLabelPosition.CENTER,
-            LabelColor = Color.White,
+            LabelColor = Color.Transparent,
             Size = 16,
             FontFamily = "Segoe UI"
         };
+    }
+
+    private static void TryUpdateFolder(MacroDeckFolder folder)
+    {
+        try
+        {
+            MacroDeckServer.UpdateFolder(folder);
+        }
+        catch (NullReferenceException)
+        {
+            // Macro Deck can throw while a phone client is reconnecting. The next tick will refresh it.
+        }
     }
 
     private static Dictionary<string, byte[]> RenderTiles(
@@ -334,7 +415,7 @@ internal static class LyricsProfileController
         graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
-        var phase = (float)((now.ToUnixTimeMilliseconds() % 16000) / 16000d);
+        var phase = (float)((now.ToUnixTimeMilliseconds() % AnimationLoopMs) / (double)AnimationLoopMs);
         DrawLyricVideoBackground(graphics, new Rectangle(0, 0, width, height), media, phase);
         DrawLyricVideoText(graphics, new Rectangle(0, 0, width, height), media, lyrics, activeLine);
 
@@ -481,7 +562,9 @@ internal static class LyricsProfileController
 
     private static void DrawMovingLight(Graphics graphics, Rectangle bounds, float phase)
     {
-        var center = bounds.Left + bounds.Width * (phase * 1.6f - 0.3f);
+        var angle = phase * MathF.Tau;
+        var center = bounds.Left + bounds.Width * (0.5f + MathF.Sin(angle) * 0.54f);
+        var alpha = 30 + (int)(MathF.Pow((MathF.Cos(angle) + 1f) * 0.5f, 1.4f) * 34f);
         using var path = new GraphicsPath();
         path.AddPolygon(new[]
         {
@@ -493,20 +576,26 @@ internal static class LyricsProfileController
         using var brush = new LinearGradientBrush(
             bounds,
             Color.FromArgb(0, 255, 255, 255),
-            Color.FromArgb(82, 255, 255, 255),
+            Color.FromArgb(alpha, 255, 255, 255),
             24f);
         graphics.FillPath(brush, path);
     }
 
     private static void DrawParticles(Graphics graphics, Rectangle bounds, float phase)
     {
-        using var brush = new SolidBrush(Color.FromArgb(88, 255, 255, 255));
+        var angle = phase * MathF.Tau;
         for (var i = 0; i < 46; i++)
         {
             var seed = i * 37.7f;
-            var x = bounds.Left + bounds.Width * Frac(MathF.Sin(seed) * 43758.5453f + phase * 0.08f);
-            var y = bounds.Top + bounds.Height * Frac(MathF.Sin(seed + 7.3f) * 24634.6345f + phase * (0.12f + i % 5 * 0.015f));
+            var baseX = Frac(MathF.Sin(seed) * 43758.5453f);
+            var baseY = Frac(MathF.Sin(seed + 7.3f) * 24634.6345f);
+            var driftX = MathF.Sin(angle + seed * 0.17f) * 0.018f;
+            var driftY = MathF.Cos(angle * 0.82f + seed * 0.11f) * 0.025f;
+            var x = bounds.Left + bounds.Width * Math.Clamp(baseX + driftX, 0.02f, 0.98f);
+            var y = bounds.Top + bounds.Height * Math.Clamp(baseY + driftY, 0.02f, 0.98f);
             var size = 2.2f + (i % 5) * 0.55f;
+            var alpha = 42 + (int)((MathF.Sin(angle * 1.35f + seed) + 1f) * 23f);
+            using var brush = new SolidBrush(Color.FromArgb(alpha, 255, 255, 255));
             graphics.FillEllipse(brush, x, y, size, size);
         }
     }
@@ -646,6 +735,70 @@ internal static class LyricsProfileController
         return new Font("Segoe UI Semibold", min, style, GraphicsUnit.Pixel);
     }
 
+#if DEV_BUILD
+    private static void ApplyTilesToButtons(MacroDeckFolder root, IReadOnlyDictionary<string, byte[]> tiles)
+    {
+        var grid = GetTargetGridSize();
+        foreach (var button in root.ActionButtons.ToArray())
+        {
+            var index = button.Position_Y * Math.Max(1, grid.Columns) + button.Position_X;
+            if (!tiles.TryGetValue($"tile_{index:000}", out var bytes))
+            {
+                continue;
+            }
+
+            using var imageStream = new MemoryStream(bytes);
+            using var image = Image.FromStream(imageStream);
+            var base64 = Base64.GetBase64FromImage(image);
+            button.IconOff = string.Empty;
+            button.IconOn = string.Empty;
+            button.LabelOff ??= CreateEmptyLabel();
+            button.LabelOn ??= CreateEmptyLabel();
+            button.LabelOff.LabelBase64 = base64;
+            button.LabelOn.LabelBase64 = base64;
+            button.LabelOff.LabelText = ".";
+            button.LabelOn.LabelText = ".";
+            button.LabelOff.LabelColor = Color.Transparent;
+            button.LabelOn.LabelColor = Color.Transparent;
+            button.LabelOff.LabelPosition = ButtonLabelPosition.CENTER;
+            button.LabelOn.LabelPosition = ButtonLabelPosition.CENTER;
+        }
+    }
+
+    private static void EnsureDevBackgroundIconPack(LyricsGridSize grid)
+    {
+        try
+        {
+            var folder = GetDynamicIconPackFolder();
+            Directory.CreateDirectory(folder);
+            EnsureDynamicIconPack();
+        }
+        catch (Exception ex)
+        {
+            if (plugin is not null)
+            {
+                MacroDeckLogger.Warning(plugin, $"Now Playing Lyrics could not prepare animated background tiles.\r\n{ex}");
+            }
+        }
+    }
+
+    private static byte[] CreateFallbackBackgroundTile(int index)
+    {
+        using var bitmap = new Bitmap(TileSize, TileSize, PixelFormat.Format32bppArgb);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using var gradient = new LinearGradientBrush(
+            new Rectangle(0, 0, TileSize, TileSize),
+            Color.FromArgb(18, 20, 34),
+            Color.FromArgb(38, 32, 68),
+            30f + index * 7f);
+        graphics.FillRectangle(gradient, 0, 0, TileSize, TileSize);
+        using var stream = new MemoryStream();
+        bitmap.Save(stream, ImageFormat.Png);
+        return stream.ToArray();
+    }
+#endif
+
     private static void SaveDynamicTiles(IReadOnlyDictionary<string, byte[]> tiles)
     {
         try
@@ -728,64 +881,87 @@ internal static class LyricsProfileController
         try
         {
             var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-            var session = manager.GetCurrentSession()
-                ?? manager.GetSessions().FirstOrDefault();
-            if (session is null)
+            var sessions = manager.GetSessions().ToList();
+            var currentSession = manager.GetCurrentSession();
+            if (currentSession is not null && sessions.All(session => session.SourceAppUserModelId != currentSession.SourceAppUserModelId))
             {
-                return MediaSnapshot.Empty;
+                sessions.Insert(0, currentSession);
             }
 
-            var properties = await session.TryGetMediaPropertiesAsync();
-            var playback = session.GetPlaybackInfo();
-            var timeline = session.GetTimelineProperties();
-            var status = playback.PlaybackStatus.ToString();
-            var isPlaying = status.Equals("Playing", StringComparison.OrdinalIgnoreCase);
-            var position = timeline.Position;
-            if (isPlaying)
+            var snapshots = new List<MediaSnapshot>();
+            foreach (var session in sessions)
             {
-                var elapsed = DateTimeOffset.Now - timeline.LastUpdatedTime;
-                if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromMinutes(10))
+                var snapshot = await ReadMediaSnapshotAsync(session);
+                if (!snapshot.IsEmpty)
                 {
-                    position += elapsed;
+                    snapshots.Add(snapshot);
                 }
             }
 
-            var duration = timeline.EndTime > timeline.StartTime
-                ? timeline.EndTime - timeline.StartTime
-                : TimeSpan.Zero;
-            position = Clamp(position, TimeSpan.Zero, duration > TimeSpan.Zero ? duration : TimeSpan.FromDays(1));
-
-            var title = CleanTrackText(properties.Title);
-            var artist = CleanTrackText(properties.Artist);
-            if (artist.Equals("Topic", StringComparison.OrdinalIgnoreCase))
-            {
-                var separator = title.LastIndexOf(" - ", StringComparison.Ordinal);
-                if (separator > 0 && separator < title.Length - 3)
-                {
-                    artist = title[(separator + 3)..].Trim();
-                    title = title[..separator].Trim();
-                }
-                else
-                {
-                    artist = string.Empty;
-                }
-            }
-
-            SplitYouTubeByTitle(ref title, ref artist);
-
-            return new MediaSnapshot(
-                Normalize(title, "Nothing playing"),
-                Normalize(artist, string.Empty),
-                status,
-                isPlaying,
-                position,
-                duration,
-                await ReadThumbnailAsync(properties.Thumbnail));
+            return snapshots
+                .OrderByDescending(snapshot => snapshot.IsPlaying)
+                .ThenByDescending(snapshot => snapshot.HasDuration)
+                .ThenByDescending(snapshot => snapshot.HasThumbnail)
+                .FirstOrDefault() ?? MediaSnapshot.Empty;
         }
         catch
         {
             return MediaSnapshot.Empty;
         }
+    }
+
+    private static async Task<MediaSnapshot> ReadMediaSnapshotAsync(GlobalSystemMediaTransportControlsSession session)
+    {
+        var properties = await session.TryGetMediaPropertiesAsync();
+        var playback = session.GetPlaybackInfo();
+        var timeline = session.GetTimelineProperties();
+        var status = playback.PlaybackStatus.ToString();
+        var isPlaying = status.Equals("Playing", StringComparison.OrdinalIgnoreCase);
+        var position = timeline.Position;
+        if (isPlaying)
+        {
+            var elapsed = DateTimeOffset.Now - timeline.LastUpdatedTime;
+            if (elapsed > TimeSpan.Zero && elapsed < TimeSpan.FromMinutes(10))
+            {
+                position += elapsed;
+            }
+        }
+
+        var duration = timeline.EndTime > timeline.StartTime
+            ? timeline.EndTime - timeline.StartTime
+            : TimeSpan.Zero;
+        position = Clamp(position, TimeSpan.Zero, duration > TimeSpan.Zero ? duration : TimeSpan.FromDays(1));
+
+        var title = CleanTrackText(properties.Title);
+        var artist = CleanTrackText(properties.Artist);
+        if (artist.Equals("Topic", StringComparison.OrdinalIgnoreCase))
+        {
+            var separator = title.LastIndexOf(" - ", StringComparison.Ordinal);
+            if (separator > 0 && separator < title.Length - 3)
+            {
+                artist = title[(separator + 3)..].Trim();
+                title = title[..separator].Trim();
+            }
+            else
+            {
+                artist = string.Empty;
+            }
+        }
+
+        SplitYouTubeByTitle(ref title, ref artist);
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return MediaSnapshot.Empty;
+        }
+
+        return new MediaSnapshot(
+            Normalize(title, "Nothing playing"),
+            Normalize(artist, string.Empty),
+            status,
+            isPlaying,
+            position,
+            duration,
+            await ReadThumbnailAsync(properties.Thumbnail));
     }
 
     private static TimeSpan Clamp(TimeSpan value, TimeSpan min, TimeSpan max)
@@ -909,7 +1085,11 @@ internal static class LyricsProfileController
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "Macro Deck",
             "plugins",
+#if DEV_BUILD
+            "lenno.NowPlayingArtButton.Dev",
+#else
             "lenno.NowPlayingArtButton",
+#endif
             "lyrics_cache",
             $"{hash}.json");
     }
@@ -1253,6 +1433,10 @@ internal static class LyricsProfileController
         public static MediaSnapshot Empty { get; } = new("Nothing playing", string.Empty, "Stopped", false, TimeSpan.Zero, TimeSpan.Zero, null);
 
         public bool IsEmpty => Title.Equals("Nothing playing", StringComparison.OrdinalIgnoreCase);
+
+        public bool HasDuration => Duration > TimeSpan.FromSeconds(10);
+
+        public bool HasThumbnail => ThumbnailBytes is { Length: > 4096 };
 
         public string GetSongKey()
         {

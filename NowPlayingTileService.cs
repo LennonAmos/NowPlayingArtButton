@@ -18,9 +18,19 @@ namespace NowPlayingArtButton;
 internal static class NowPlayingTileService
 {
     private const int TileSize = 512;
-    private const string DynamicIconPackName = "Now Playing Art Button";
+    private const string DynamicIconPackName =
+#if DEV_BUILD
+        "Now Playing Art Button Dev";
+#else
+        "Now Playing Art Button";
+#endif
     private const string DynamicIconPackAuthor = "lenno";
-    private const string DynamicIconPackPackageId = "lenno.NowPlayingArtButton.DynamicIcons";
+    private const string DynamicIconPackPackageId =
+#if DEV_BUILD
+        "lenno.NowPlayingArtButton.Dev.DynamicIcons";
+#else
+        "lenno.NowPlayingArtButton.DynamicIcons";
+#endif
     private const string DynamicIconId = "current";
     private static readonly object Gate = new();
     private static readonly Dictionary<string, ActionButton> Buttons = new();
@@ -32,6 +42,7 @@ internal static class NowPlayingTileService
     private static readonly System.Threading.Timer Timer = new(_ => Tick(), null, Timeout.Infinite, Timeout.Infinite);
     private static MacroDeckPlugin? plugin;
     private static bool isPolling;
+    private static bool dynamicIconPackPrepared;
     private static string lastFingerprint = string.Empty;
     private static string lastBase64 = string.Empty;
     private static byte[]? lastPngBytes;
@@ -57,14 +68,23 @@ internal static class NowPlayingTileService
 
     public static void PruneMissingButtons()
     {
-        lock (Gate)
+        HashSet<string> liveGuids;
+        try
         {
-            var liveGuids = ProfileManager.Profiles
-                .SelectMany(profile => profile.Folders)
-                .SelectMany(folder => folder.ActionButtons)
+            liveGuids = ProfileManager.Profiles
+                .ToArray()
+                .SelectMany(profile => profile.Folders.ToArray())
+                .SelectMany(folder => folder.ActionButtons.ToArray())
                 .Select(button => button.Guid)
                 .ToHashSet(StringComparer.Ordinal);
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
 
+        lock (Gate)
+        {
             foreach (var guid in Buttons.Keys.Where(guid => !liveGuids.Contains(guid)).ToArray())
             {
                 Buttons.Remove(guid);
@@ -74,18 +94,49 @@ internal static class NowPlayingTileService
 
     private static void DiscoverButtons()
     {
+        List<ActionButton> buttons;
+        try
+        {
+            buttons = ProfileManager.Profiles
+                .ToArray()
+                .SelectMany(profile => profile.Folders.ToArray())
+                .SelectMany(folder => folder.ActionButtons.ToArray())
+                .Where(button => HasNowPlayingAction(button) ||
+                                 UsesNowPlayingIcon(button) ||
+                                 HasNowPlayingVariableLabel(button) ||
+                                 LooksLikeExistingNowPlayingTile(button))
+                .ToList();
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
         lock (Gate)
         {
-            foreach (var button in ProfileManager.Profiles
-                         .SelectMany(profile => profile.Folders)
-                         .SelectMany(folder => folder.ActionButtons)
-                         .Where(button => button.Actions.Any(action => action is UseNowPlayingArtButtonAction) ||
-                                          HasNowPlayingVariableLabel(button) ||
-                                          LooksLikeExistingNowPlayingTile(button)))
+            foreach (var button in buttons)
             {
                 Buttons[button.Guid] = button;
             }
         }
+    }
+
+    private static bool HasNowPlayingAction(ActionButton button)
+    {
+        return button.Actions.Any(action =>
+            action is UseNowPlayingArtButtonAction ||
+            action is OpenLyricsProfileAction);
+    }
+
+    private static bool UsesNowPlayingIcon(ActionButton button)
+    {
+        return IsNowPlayingIcon(button.IconOff) || IsNowPlayingIcon(button.IconOn);
+    }
+
+    private static bool IsNowPlayingIcon(string? icon)
+    {
+        return !string.IsNullOrWhiteSpace(icon) &&
+               icon.StartsWith("Now Playing Art Button", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool LooksLikeExistingNowPlayingTile(ActionButton button)
@@ -193,11 +244,6 @@ internal static class NowPlayingTileService
         if (string.IsNullOrEmpty(lastBase64))
         {
             return;
-        }
-
-        if (lastPngBytes is { Length: > 0 })
-        {
-            SaveDynamicIcon(lastPngBytes);
         }
 
         List<ActionButton> buttons;
@@ -679,27 +725,51 @@ internal static class NowPlayingTileService
             return;
         }
 
-        button.IconOff = $"{DynamicIconPackName}.{DynamicIconId}";
-        button.IconOn = $"{DynamicIconPackName}.{DynamicIconId}";
+        var structuralChange = !string.IsNullOrWhiteSpace(button.IconOff) ||
+                               !string.IsNullOrWhiteSpace(button.IconOn) ||
+                               button.BackColorOff != Color.FromArgb(16, 18, 24) ||
+                               button.BackColorOn != Color.FromArgb(16, 18, 24);
+
+        button.IconOff = string.Empty;
+        button.IconOn = string.Empty;
         button.LabelOff ??= new ButtonLabel();
         button.LabelOn ??= new ButtonLabel();
         button.LabelOff.LabelBase64 = imageBase64;
         button.LabelOn.LabelBase64 = imageBase64;
-        button.LabelOff.LabelText = string.Empty;
-        button.LabelOn.LabelText = string.Empty;
+        button.LabelOff.LabelText = ".";
+        button.LabelOn.LabelText = ".";
+        button.LabelOff.LabelColor = Color.Transparent;
+        button.LabelOn.LabelColor = Color.Transparent;
+        button.LabelOff.LabelPosition = ButtonLabelPosition.CENTER;
+        button.LabelOn.LabelPosition = ButtonLabelPosition.CENTER;
         button.BackColorOff = Color.FromArgb(16, 18, 24);
         button.BackColorOn = Color.FromArgb(16, 18, 24);
         if (button.Actions.All(action => action is not UseNowPlayingArtButtonAction))
         {
             button.Actions.Add(new UseNowPlayingArtButtonAction());
+            structuralChange = true;
+        }
+
+        if (button.Actions.All(action => action is not OpenLyricsProfileAction))
+        {
+            button.Actions.Add(new OpenLyricsProfileAction());
+            structuralChange = true;
         }
 
         RefreshButton(button);
-        ProfileManager.Save();
+        if (structuralChange)
+        {
+            ProfileManager.Save();
+        }
     }
 
     private static void EnsureDynamicIconPack()
     {
+        if (dynamicIconPackPrepared)
+        {
+            return;
+        }
+
         try
         {
             var folder = GetDynamicIconPackFolder();
@@ -707,13 +777,13 @@ internal static class NowPlayingTileService
             var manifestPath = Path.Combine(folder, "ExtensionManifest.json");
             if (!File.Exists(manifestPath))
             {
-                File.WriteAllText(manifestPath, """
+                File.WriteAllText(manifestPath, $$"""
                 {
                   "type": 1,
-                  "name": "Now Playing Art Button",
+                  "name": "{{DynamicIconPackName}}",
                   "author": "lenno",
                   "repository": "https://github.com/LennonAmos/NowPlayingArtButton",
-                  "packageId": "lenno.NowPlayingArtButton.DynamicIcons",
+                  "packageId": "{{DynamicIconPackPackageId}}",
                   "version": "1.0.0",
                   "target-plugin-api-version": 40,
                   "dll": ""
@@ -721,7 +791,13 @@ internal static class NowPlayingTileService
                 """);
             }
 
-            IconManager.LoadIconPack(folder);
+            var iconPath = Path.Combine(folder, $"{DynamicIconId}.png");
+            if (!File.Exists(iconPath))
+            {
+                TryWriteAllBytes(iconPath, CreatePlaceholderIcon());
+            }
+
+            dynamicIconPackPrepared = true;
         }
         catch (Exception ex)
         {
@@ -738,8 +814,7 @@ internal static class NowPlayingTileService
         {
             var folder = GetDynamicIconPackFolder();
             Directory.CreateDirectory(folder);
-            File.WriteAllBytes(Path.Combine(folder, $"{DynamicIconId}.png"), pngBytes);
-            IconManager.LoadIconPack(folder);
+            TryWriteAllBytes(Path.Combine(folder, $"{DynamicIconId}.png"), pngBytes);
         }
         catch (Exception ex)
         {
@@ -748,6 +823,53 @@ internal static class NowPlayingTileService
                 MacroDeckLogger.Warning(plugin, $"Now Playing Art Button could not update dynamic icon.\r\n{ex}");
             }
         }
+    }
+
+    private static bool TryWriteAllBytes(string path, byte[] bytes)
+    {
+        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                File.WriteAllBytes(tempPath, bytes);
+                File.Copy(tempPath, path, true);
+                File.Delete(tempPath);
+                return true;
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(50);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                Thread.Sleep(50);
+            }
+        }
+
+        try
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
+        catch
+        {
+            // Best effort cleanup only.
+        }
+
+        return false;
+    }
+
+    private static byte[] CreatePlaceholderIcon()
+    {
+        using var bitmap = new Bitmap(TileSize, TileSize);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.Clear(Color.FromArgb(16, 18, 24));
+        using var stream = new MemoryStream();
+        bitmap.Save(stream, ImageFormat.Png);
+        return stream.ToArray();
     }
 
     private static string GetDynamicIconPackFolder()

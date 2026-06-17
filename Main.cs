@@ -8,12 +8,13 @@ public sealed class Main : MacroDeckPlugin
 
     public override void Enable()
     {
-        NowPlayingTileService.SetPlugin(this);
-        LyricsProfileController.SetPlugin(this);
         Actions = new List<PluginAction>
         {
             new UseNowPlayingArtButtonAction(),
             new OpenLyricsProfileAction()
         };
+        _ = ActionCleanup.RemoveSleepModeActionsAfterProfilesLoadAsync(this);
+        NowPlayingTileService.SetPlugin(this);
+        LyricsProfileController.SetPlugin(this);
     }
 }

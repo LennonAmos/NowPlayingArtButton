@@ -14,6 +14,7 @@ public sealed class UseNowPlayingArtButtonAction : PluginAction
     public override void Trigger(string clientId, ActionButton actionButton)
     {
         NowPlayingTileService.RegisterButton(actionButton);
+        LyricsProfileController.GoToLyricsProfile(clientId);
     }
 
     public override void OnActionButtonDelete()
