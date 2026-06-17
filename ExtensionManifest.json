@@ -3,7 +3,7 @@
   "name": "Now Playing Art + Lyrics",
   "author": "lenno",
   "packageId": "lenno.NowPlayingArtButton",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "target-plugin-api-version": 40,
   "target-macro-deck-version": "2.14.1",
   "repository": "https://github.com/LennonAmos/NowPlayingArtButton",

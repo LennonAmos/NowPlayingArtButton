@@ -35,6 +35,8 @@ While the lyrics profile is open, the plugin:
 - renders a generated lyric-video style animated background across the whole Macro Deck grid
 - splits that full-screen render into dynamic icon tiles so desktop and phone clients see one joined screen
 
+For performance, the lyrics profile polls the current playback position several times per second, but it only redraws the Macro Deck grid when the active lyric line or song changes. This keeps seeking and skipping responsive without constantly reloading every button image.
+
 The plugin does not bundle lyric files, copyrighted videos, fan-made videos, or artwork assets. The moving background is generated locally by the plugin.
 
 ## Online artwork lookup

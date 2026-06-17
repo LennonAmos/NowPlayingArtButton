@@ -28,11 +28,13 @@ internal static class LyricsProfileController
     private const string DynamicIconPackName = "Now Playing Lyrics";
     private const string DynamicIconPackAuthor = "lenno";
     private const string DynamicIconPackPackageId = "lenno.NowPlayingArtButton.LyricsDynamicIcons";
-    private static readonly TimeSpan RenderInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan LyricDisplayLead = TimeSpan.FromMilliseconds(550);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly object Gate = new();
     private static readonly Dictionary<string, string> PreviousProfileByClient = new();
     private static readonly HashSet<string> ActiveClients = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, LyricsDocument> LyricsCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, string> TileHashes = new(StringComparer.Ordinal);
     private static readonly HttpClient HttpClient = CreateHttpClient();
     private static readonly Regex LrcTimestampRegex = new(@"\[(\d{1,3}):(\d{1,2}(?:\.\d{1,3})?)\]", RegexOptions.Compiled);
     private static readonly System.Threading.Timer Timer = new(_ => Tick(), null, Timeout.Infinite, Timeout.Infinite);
@@ -46,7 +48,7 @@ internal static class LyricsProfileController
     {
         plugin = macroDeckPlugin;
         EnsureDynamicIconPack();
-        Timer.Change(TimeSpan.FromSeconds(1), RenderInterval);
+        Timer.Change(TimeSpan.FromSeconds(1), PollInterval);
     }
 
     public static bool GoToLyricsProfile(string clientId)
@@ -161,9 +163,9 @@ internal static class LyricsProfileController
             }
 
             var now = DateTimeOffset.UtcNow;
-            var frameBucket = (long)(now.ToUnixTimeMilliseconds() / RenderInterval.TotalMilliseconds);
-            var activeLine = currentLyrics.GetActiveLine(media.Position);
-            var fingerprint = $"{grid.Rows}x{grid.Columns}|{media.GetFrameKey()}|{activeLine.Index}|{frameBucket}";
+            var lyricPosition = media.IsPlaying ? media.Position + LyricDisplayLead : media.Position;
+            var activeLine = currentLyrics.GetActiveLine(lyricPosition);
+            var fingerprint = $"{grid.Rows}x{grid.Columns}|{media.GetRenderIdentity()}|{activeLine.Index}";
             if (!force && fingerprint.Equals(lastRenderedFingerprint, StringComparison.Ordinal))
             {
                 return;
@@ -650,15 +652,28 @@ internal static class LyricsProfileController
         {
             var folder = GetDynamicIconPackFolder();
             Directory.CreateDirectory(folder);
+            var changed = false;
             foreach (var (id, bytes) in tiles)
             {
+                var hash = Convert.ToHexString(SHA256.HashData(bytes));
+                if (TileHashes.TryGetValue(id, out var existingHash) &&
+                    existingHash.Equals(hash, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 var targetPath = Path.Combine(folder, $"{id}.png");
                 var tempPath = Path.Combine(folder, $"{id}.{Guid.NewGuid():N}.tmp");
                 File.WriteAllBytes(tempPath, bytes);
                 File.Move(tempPath, targetPath, overwrite: true);
+                TileHashes[id] = hash;
+                changed = true;
             }
 
-            IconManager.LoadIconPack(folder);
+            if (changed)
+            {
+                IconManager.LoadIconPack(folder);
+            }
         }
         catch (Exception ex)
         {
@@ -969,16 +984,121 @@ internal static class LyricsProfileController
             return LyricsDocument.Empty("No synced lyrics found");
         }
 
+        LyricsDocument bestLyrics = LyricsDocument.Empty("No synced lyrics found");
+        var bestScore = int.MinValue;
         foreach (var item in json.RootElement.EnumerateArray())
         {
             var parsed = ParseLyricsFromElement(item);
-            if (parsed.Lines.Count > 0)
+            if (parsed.Lines.Count == 0)
             {
-                return parsed;
+                continue;
+            }
+
+            var score = ScoreLyricsCandidate(item, media);
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestLyrics = parsed;
             }
         }
 
-        return LyricsDocument.Empty("No synced lyrics found");
+        return bestLyrics;
+    }
+
+    private static int ScoreLyricsCandidate(JsonElement item, MediaSnapshot media)
+    {
+        var score = 0;
+        var candidateTitle = GetJsonString(item, "trackName");
+        var candidateArtist = GetJsonString(item, "artistName");
+        if (TextMatches(candidateTitle, media.Title))
+        {
+            score += 60;
+        }
+        else if (ContainsEither(candidateTitle, media.Title))
+        {
+            score += 25;
+        }
+
+        if (!string.IsNullOrWhiteSpace(media.Artist))
+        {
+            if (TextMatches(candidateArtist, media.Artist))
+            {
+                score += 45;
+            }
+            else if (ContainsEither(candidateArtist, media.Artist))
+            {
+                score += 18;
+            }
+        }
+
+        if (media.Duration > TimeSpan.Zero && item.TryGetProperty("duration", out var durationNode))
+        {
+            var candidateSeconds = durationNode.ValueKind switch
+            {
+                JsonValueKind.Number when durationNode.TryGetInt32(out var intSeconds) => intSeconds,
+                JsonValueKind.Number when durationNode.TryGetDouble(out var doubleSeconds) => (int)Math.Round(doubleSeconds),
+                _ => 0
+            };
+            if (candidateSeconds > 0)
+            {
+                var difference = Math.Abs(candidateSeconds - (int)Math.Round(media.Duration.TotalSeconds));
+                score += difference switch
+                {
+                    <= 1 => 60,
+                    <= 3 => 45,
+                    <= 6 => 25,
+                    <= 12 => 10,
+                    _ => -30
+                };
+            }
+        }
+
+        return score;
+    }
+
+    private static string GetJsonString(JsonElement item, string propertyName)
+    {
+        return item.TryGetProperty(propertyName, out var value) ? value.GetString() ?? string.Empty : string.Empty;
+    }
+
+    private static bool TextMatches(string left, string right)
+    {
+        return NormalizeForCompare(left).Equals(NormalizeForCompare(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsEither(string left, string right)
+    {
+        var cleanLeft = NormalizeForCompare(left);
+        var cleanRight = NormalizeForCompare(right);
+        return cleanLeft.Length > 0 &&
+               cleanRight.Length > 0 &&
+               (cleanLeft.Contains(cleanRight, StringComparison.OrdinalIgnoreCase) ||
+                cleanRight.Contains(cleanLeft, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeForCompare(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var cleaned = CleanTrackText(value).ToLowerInvariant();
+        foreach (var token in new[] { "feat.", "ft.", "remastered", "remaster", "explicit" })
+        {
+            cleaned = cleaned.Replace(token, string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var builder = new StringBuilder(cleaned.Length);
+        foreach (var character in cleaned)
+        {
+            if (char.IsLetterOrDigit(character) || char.IsWhiteSpace(character))
+            {
+                builder.Append(character);
+            }
+        }
+
+        return Regex.Replace(builder.ToString(), @"\s+", " ").Trim();
     }
 
     private static LyricsDocument ParseLyricsFromElement(JsonElement element)
@@ -1139,9 +1259,9 @@ internal static class LyricsProfileController
             return $"{Title}\u001f{Artist}\u001f{(int)Math.Round(Duration.TotalSeconds)}";
         }
 
-        public string GetFrameKey()
+        public string GetRenderIdentity()
         {
-            return $"{Title}\u001f{Artist}\u001f{PlaybackStatus}\u001f{(int)Position.TotalSeconds}\u001f{(int)Duration.TotalSeconds}";
+            return $"{Title}\u001f{Artist}\u001f{PlaybackStatus}\u001f{(int)Duration.TotalSeconds}\u001f{ThumbnailBytes?.Length ?? 0}";
         }
     }
 
@@ -1182,7 +1302,7 @@ internal static class LyricsProfileController
             }
 
             var text = Lines[index].Text;
-            return new ActiveLyricLine(index, string.IsNullOrWhiteSpace(text) ? "♪" : text);
+            return new ActiveLyricLine(index, string.IsNullOrWhiteSpace(text) ? "~" : text);
         }
 
         public string GetLineText(int index)
@@ -1193,7 +1313,7 @@ internal static class LyricsProfileController
             }
 
             var text = Lines[index].Text;
-            return string.IsNullOrWhiteSpace(text) ? "♪" : text;
+            return string.IsNullOrWhiteSpace(text) ? "~" : text;
         }
     }
 
