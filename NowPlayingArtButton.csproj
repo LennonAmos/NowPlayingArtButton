@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.22000.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
@@ -13,9 +13,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Reference Include="Macro Deck 2">
-      <HintPath>C:\Program Files\Macro Deck\Macro Deck 2.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <PackageReference Include="SuchByte.MacroDeck" Version="2.14.1" PrivateAssets="all" />
   </ItemGroup>
 </Project>
