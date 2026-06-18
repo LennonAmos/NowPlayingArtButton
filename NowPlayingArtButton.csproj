@@ -9,7 +9,7 @@
     <RootNamespace>NowPlayingArtButton</RootNamespace>
     <PackageId>lenno.NowPlayingArtButton</PackageId>
     <Authors>lenno</Authors>
-    <Version>1.1.2</Version>
+    <Version>1.1.3</Version>
   </PropertyGroup>
 
   <ItemGroup>
